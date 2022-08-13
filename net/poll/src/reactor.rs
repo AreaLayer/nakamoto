@@ -2,13 +2,14 @@
 use crossbeam_channel as chan;
 
 use nakamoto_common::block::time::{LocalDuration, LocalTime};
-
 use nakamoto_p2p::error::Error;
-use nakamoto_p2p::protocol;
-use nakamoto_p2p::protocol::{Command, DisconnectReason, Event, Io, Link};
+use nakamoto_p2p::event::Publisher;
+use nakamoto_p2p::protocol::{Command, Link};
+use nakamoto_p2p::traits;
+use nakamoto_p2p::traits::Protocol;
+use nakamoto_p2p::traits::{DisconnectReason, Io};
 
 use log::*;
-use nakamoto_p2p::traits::Protocol;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
@@ -41,19 +42,19 @@ enum Source {
 }
 
 /// A single-threaded non-blocking reactor.
-pub struct Reactor<R: Write + Read, E> {
+pub struct Reactor<R: Write + Read> {
     peers: HashMap<net::SocketAddr, Socket<R>>,
     connecting: HashSet<net::SocketAddr>,
     commands: chan::Receiver<Command>,
-    publisher: E,
     sources: popol::Sources<Source>,
     waker: Arc<popol::Waker>,
     timeouts: TimeoutManager<()>,
     shutdown: chan::Receiver<()>,
+    listening: chan::Sender<net::SocketAddr>,
 }
 
 /// The `R` parameter represents the underlying stream type, eg. `net::TcpStream`.
-impl<R: Write + Read + AsRawFd, E> Reactor<R, E> {
+impl<R: Write + Read + AsRawFd> Reactor<R> {
     /// Register a peer with the reactor.
     fn register_peer(&mut self, addr: net::SocketAddr, stream: R, link: Link) {
         self.sources
@@ -65,7 +66,7 @@ impl<R: Write + Read + AsRawFd, E> Reactor<R, E> {
     fn unregister_peer<P>(
         &mut self,
         addr: net::SocketAddr,
-        reason: DisconnectReason,
+        reason: DisconnectReason<P::DisconnectReason>,
         protocol: &mut P,
     ) where
         P: Protocol,
@@ -78,16 +79,14 @@ impl<R: Write + Read + AsRawFd, E> Reactor<R, E> {
     }
 }
 
-impl<E: protocol::event::Publisher> nakamoto_p2p::traits::Reactor<E>
-    for Reactor<net::TcpStream, E>
-{
+impl traits::Reactor for Reactor<net::TcpStream> {
     type Waker = Arc<popol::Waker>;
 
     /// Construct a new reactor, given a channel to send events on.
     fn new(
-        publisher: E,
         commands: chan::Receiver<Command>,
         shutdown: chan::Receiver<()>,
+        listening: chan::Sender<net::SocketAddr>,
     ) -> Result<Self, io::Error> {
         let peers = HashMap::new();
 
@@ -101,17 +100,23 @@ impl<E: protocol::event::Publisher> nakamoto_p2p::traits::Reactor<E>
             connecting,
             sources,
             commands,
-            publisher,
             waker,
             timeouts,
             shutdown,
+            listening,
         })
     }
 
     /// Run the given protocol with the reactor.
-    fn run<P>(&mut self, listen_addrs: &[net::SocketAddr], mut protocol: P) -> Result<(), Error>
+    fn run<P, E>(
+        &mut self,
+        listen_addrs: &[net::SocketAddr],
+        mut protocol: P,
+        mut publisher: E,
+    ) -> Result<(), Error>
     where
         P: Protocol,
+        E: Publisher<P::Event>,
     {
         let listener = if listen_addrs.is_empty() {
             None
@@ -121,7 +126,7 @@ impl<E: protocol::event::Publisher> nakamoto_p2p::traits::Reactor<E>
 
             self.sources
                 .register(Source::Listener, &listener, popol::interest::READ);
-            self.publisher.publish(Event::Listening(local_addr));
+            self.listening.send(local_addr).ok();
 
             info!("Listening on {}", local_addr);
 
@@ -133,7 +138,7 @@ impl<E: protocol::event::Publisher> nakamoto_p2p::traits::Reactor<E>
         let local_time = SystemTime::now().into();
         protocol.initialize(local_time);
 
-        self.process(&mut protocol, local_time);
+        self.process(&mut protocol, &mut publisher, local_time);
 
         // I/O readiness events populated by `popol::Sources::wait_timeout`.
         let mut events = popol::Events::new();
@@ -241,7 +246,7 @@ impl<E: protocol::event::Publisher> nakamoto_p2p::traits::Reactor<E>
                 }
                 Err(err) => return Err(err.into()),
             }
-            self.process(&mut protocol, local_time);
+            self.process(&mut protocol, &mut publisher, local_time);
         }
     }
 
@@ -258,11 +263,12 @@ impl<E: protocol::event::Publisher> nakamoto_p2p::traits::Reactor<E>
     }
 }
 
-impl<E: protocol::event::Publisher> Reactor<net::TcpStream, E> {
+impl Reactor<net::TcpStream> {
     /// Process protocol state machine outputs.
-    fn process<P>(&mut self, protocol: &mut P, local_time: LocalTime)
+    fn process<P, E>(&mut self, protocol: &mut P, publisher: &mut E, local_time: LocalTime)
     where
         P: Protocol,
+        E: Publisher<P::Event>,
     {
         // Note that there may be messages destined for a peer that has since been
         // disconnected.
@@ -294,7 +300,7 @@ impl<E: protocol::event::Publisher> Reactor<net::TcpStream, E> {
 
                             protocol.disconnected(
                                 &addr,
-                                DisconnectReason::ConnectionError(Arc::new(err)),
+                                DisconnectReason::PeerConnectionError(Arc::new(err)),
                             );
                         }
                     }
@@ -318,7 +324,7 @@ impl<E: protocol::event::Publisher> Reactor<net::TcpStream, E> {
                 Io::Event(event) => {
                     trace!("Event: {:?}", event);
 
-                    self.publisher.publish(event);
+                    publisher.publish(event);
                 }
             }
         }
@@ -365,7 +371,7 @@ impl<E: protocol::event::Publisher> Reactor<net::TcpStream, E> {
                     socket.disconnect().ok();
                     self.unregister_peer(
                         *addr,
-                        DisconnectReason::ConnectionError(Arc::new(err)),
+                        DisconnectReason::PeerConnectionError(Arc::new(err)),
                         protocol,
                     );
                 }
@@ -416,7 +422,7 @@ impl<E: protocol::event::Publisher> Reactor<net::TcpStream, E> {
                 socket.disconnect().ok();
                 self.unregister_peer(
                     *addr,
-                    DisconnectReason::ConnectionError(Arc::new(err)),
+                    DisconnectReason::PeerConnectionError(Arc::new(err)),
                     protocol,
                 );
             }

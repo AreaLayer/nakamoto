@@ -37,7 +37,7 @@ pub enum Input {
         link: Link,
     },
     /// Disconnected from peer.
-    Disconnected(PeerId, DisconnectReason),
+    Disconnected(PeerId, traits::DisconnectReason<DisconnectReason>),
     /// Received a message from a remote peer.
     Received(PeerId, Vec<u8>),
     /// Used to advance the state machine after some wall time has passed.
@@ -471,7 +471,7 @@ impl Simulation {
                                 remote,
                                 input: Input::Disconnected(
                                     remote,
-                                    DisconnectReason::ConnectionError(
+                                    traits::DisconnectReason::PeerConnectionError(
                                         io::Error::from(io::ErrorKind::UnexpectedEof).into(),
                                     ),
                                 ),
@@ -529,7 +529,7 @@ impl Simulation {
                         remote: local_addr,
                         input: Input::Disconnected(
                             local_addr,
-                            DisconnectReason::ConnectionError(
+                            traits::DisconnectReason::PeerConnectionError(
                                 io::Error::from(io::ErrorKind::UnexpectedEof).into(),
                             ),
                         ),

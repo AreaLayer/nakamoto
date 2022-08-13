@@ -51,7 +51,8 @@ use nakamoto_test::assert_matches;
 use nakamoto_test::block::gen;
 use nakamoto_test::logger;
 
-use p2p::protocol::{Command, DisconnectReason};
+use p2p::protocol::Command;
+use p2p::traits::DisconnectReason;
 use p2p::traits::Protocol as _;
 
 use super::p2p::protocol::Link;
@@ -98,13 +99,13 @@ fn test_peer_connected_disconnected() {
 
     client.protocol.disconnected(
         &remote,
-        DisconnectReason::ConnectionError(io::Error::from(io::ErrorKind::UnexpectedEof).into()),
+        DisconnectReason::PeerConnectionError(io::Error::from(io::ErrorKind::UnexpectedEof).into()),
     );
     client.step();
 
     assert_matches!(
         events.try_recv(),
-        Ok(Event::PeerDisconnected { addr, reason: DisconnectReason::ConnectionError(_) })
+        Ok(Event::PeerDisconnected { addr, reason: DisconnectReason::PeerConnectionError(_) })
         if addr == remote
     );
 }
@@ -125,7 +126,7 @@ fn test_peer_connection_failed() {
 
     client.protocol.disconnected(
         &remote,
-        DisconnectReason::ConnectionError(io::Error::from(io::ErrorKind::UnexpectedEof).into()),
+        DisconnectReason::PeerConnectionError(io::Error::from(io::ErrorKind::UnexpectedEof).into()),
     );
     client.step();
 

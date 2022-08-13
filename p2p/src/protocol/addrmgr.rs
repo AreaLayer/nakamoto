@@ -15,7 +15,8 @@ use nakamoto_common::p2p::peer::{AddressSource, KnownAddress, Source, Store};
 use nakamoto_common::p2p::Domain;
 
 use super::output::Wakeup;
-use super::{DisconnectReason, Link, PeerId};
+use super::traits::DisconnectReason;
+use super::{Link, PeerId};
 
 /// Time to wait until a request times out.
 pub const REQUEST_TIMEOUT: LocalDuration = LocalDuration::from_mins(1);
@@ -283,7 +284,11 @@ impl<P: Store, U: SyncAddresses + Wakeup + Events, C: Clock> AddressManager<P, U
     }
 
     /// Called when a peer disconnected.
-    pub fn peer_disconnected(&mut self, addr: &net::SocketAddr, reason: DisconnectReason) {
+    pub fn peer_disconnected(
+        &mut self,
+        addr: &net::SocketAddr,
+        reason: DisconnectReason<super::DisconnectReason>,
+    ) {
         if self.connected.remove(&addr.ip()) {
             // Disconnected peers cannot be used as a source for new addresses.
             self.sources.remove(addr);
@@ -683,6 +688,7 @@ fn ipv6_is_routable(_addr: &net::Ipv6Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol;
     use std::collections::HashMap;
     use std::iter;
 
@@ -830,7 +836,7 @@ mod tests {
         addrmgr.peer_negotiated(&([44, 44, 44, 44], 8333).into(), services, Link::Outbound);
         addrmgr.peer_disconnected(
             &([44, 44, 44, 44], 8333).into(),
-            DisconnectReason::PeerTimeout("timeout"),
+            protocol::DisconnectReason::PeerTimeout("timeout").into(),
         );
         assert!(!addrmgr.is_exhausted());
         assert!(addrmgr.sample(services).is_some());
@@ -851,7 +857,7 @@ mod tests {
         addrmgr.peer_connected(&([55, 55, 55, 55], 8333).into());
         addrmgr.peer_disconnected(
             &([55, 55, 55, 55], 8333).into(),
-            DisconnectReason::PeerTimeout("timeout"),
+            protocol::DisconnectReason::PeerTimeout("timeout").into(),
         );
         assert!(addrmgr.sample(services).is_none());
     }
@@ -882,7 +888,10 @@ mod tests {
         addrmgr.peer_attempted(addr);
         addrmgr.peer_connected(addr);
         addrmgr.peer_negotiated(addr, services, Link::Outbound);
-        addrmgr.peer_disconnected(addr, DisconnectReason::PeerMisbehaving("misbehaving"));
+        addrmgr.peer_disconnected(
+            addr,
+            protocol::DisconnectReason::PeerMisbehaving("misbehaving").into(),
+        );
 
         // Peer is now disconnected for non-transient reasons.
         // Receive from a new peer the same address we just disconnected from.
